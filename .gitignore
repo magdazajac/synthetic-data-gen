@@ -1,0 +1,28 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Streamlit secrets and local configuration
+.streamlit/secrets.toml
+
+# Environment variables
+.env
+.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Generated data archives and temporary exports
+*.zip
+*.csv
+
+# Local Docker database volumes (if mapped locally)
+pgdata/

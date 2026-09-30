@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  postgres_db:
+    image: postgres:15
+    container_name: synthetic_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: synthetic_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
