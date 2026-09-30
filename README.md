@@ -56,3 +56,22 @@ flowchart TD
         H --> E
         E --> I[Interactive Results Table]
     end
+```
+---
+
+## 🚀 Quickstart Guide
+
+### 1. Prerequisites
+* **Docker** running locally.
+* **Python 3.9+** installed.
+* GCP credentials configured for **Google Cloud Vertex AI**.
+
+### 2. Database Setup (Docker)
+Run a local PostgreSQL container:
+```bash
+docker run -d \
+  --name synthetic_postgres \
+  -e POSTGRES_PASSWORD=postgrespassword \
+  -e POSTGRES_DB=synthetic_db \
+  -p 5432:5432 \
+  postgres:15
