@@ -1,9 +1,10 @@
 import io
 import json
+import re
 import zipfile
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from google import genai
 from google.genai import types
 from langfuse import Langfuse
@@ -12,7 +13,7 @@ from langfuse import Langfuse
 # PAGE CONFIGURATION
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Synthetic Data Generator",
+    page_title="Synthetic Data Generator & Text-to-SQL",
     page_icon="📊",
     layout="wide"
 )
@@ -20,14 +21,12 @@ st.set_page_config(
 # ---------------------------------------------------------
 # SECURE CREDENTIALS & SERVICE INITIALIZATION
 # ---------------------------------------------------------
-# Safely fetch DB URL from secrets.toml, falling back to local Docker defaults for local dev
 DB_URL = st.secrets.get(
     "DB_URL", 
     "postgresql://postgres:postgrespassword@localhost:5432/synthetic_db"
 )
 engine = create_engine(DB_URL)
 
-# Safely initialize Langfuse for observability
 langfuse = Langfuse(
     public_key=st.secrets.get("LANGFUSE_PUBLIC_KEY", "pk-dummy"),
     secret_key=st.secrets.get("LANGFUSE_SECRET_KEY", "sk-dummy"),
@@ -54,8 +53,29 @@ def save_to_postgres(tables_data: dict) -> None:
         for table_name, rows in tables_data.items():
             if rows:
                 df = pd.DataFrame(rows)
-                # Replaces table schema and data safely in PostgreSQL
                 df.to_sql(table_name.lower(), con=conn, if_exists='replace', index=False)
+
+def get_db_schema_string() -> str:
+    """Extracts tables and column definitions from PostgreSQL database for LLM context."""
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if not table_names:
+        return "No tables found in the database."
+    
+    schema_info = []
+    for table_name in table_names:
+        columns = inspector.get_columns(table_name)
+        col_defs = [f"{col['name']} ({col['type']})" for col in columns]
+        schema_info.append(f"Table '{table_name}': " + ", ".join(col_defs))
+    return "\n".join(schema_info)
+
+def clean_sql_query(raw_response: str) -> str:
+    """Cleans markdown code formatting from Gemini output to get raw SQL."""
+    query = raw_response.strip()
+    query = re.sub(r"^```sql\s*", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"^```\s*", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s*```$", "", query, flags=re.IGNORECASE)
+    return query.strip()
 
 # ---------------------------------------------------------
 # SIDEBAR NAVIGATION
@@ -69,15 +89,13 @@ tab_selection = st.sidebar.radio("Select Mode:", ["Data Generation", "Talk to yo
 if tab_selection == "Data Generation":
     st.title("📊 Synthetic Data Generation")
 
-    # Inputs
     uploaded_file = st.file_uploader("Upload DDL Schema File", type=["sql", "txt", "ddl"])
     user_prompt = st.text_area(
         "Additional Instructions (Prompt)", 
-        placeholder="E.g., All books should belong to the Sci-Fi genre, and member names should be realistic."
+        placeholder="E.g., All books should belong to Sci-Fi, and member names should be realistic."
     )
     temperature = st.slider("Temperature (Creativity)", min_value=0.0, max_value=1.0, value=0.2, step=0.1)
 
-    # Generation Trigger
     if st.button("Generate", type="primary"):
         if uploaded_file is None:
             st.error("Please upload a valid DDL schema file first!")
@@ -87,7 +105,6 @@ if tab_selection == "Data Generation":
                     ddl_schema = uploaded_file.read().decode("utf-8")
                     st.session_state['current_ddl'] = ddl_schema
 
-                    # Initialize Google GenAI client (Vertex AI authentication)
                     client = genai.Client(
                         vertexai=True,
                         project='gd-gcp-gridu-genai',
@@ -158,7 +175,7 @@ Return the result ONLY as a valid JSON object where keys are table names and val
                 edit_prompt = st.text_input(
                     f"Enter prompt instructions for '{table_name}':", 
                     key=f"prompt_{table_name}",
-                    placeholder="E.g., Change all publication dates to 2024 or add 2 more rows..."
+                    placeholder="E.g., Change all publication dates to 2024..."
                 )
                 
                 if st.button(f"Submit changes for {table_name}", key=f"btn_{table_name}"):
@@ -203,8 +220,78 @@ Return the result ONLY as a valid JSON array of row objects for this SINGLE tabl
                                 st.error(f"Error updating table '{table_name}': {e}")
 
 # ---------------------------------------------------------
-# TAB 2: TALK TO YOUR DATA
+# TAB 2: TALK TO YOUR DATA (Text-to-SQL)
 # ---------------------------------------------------------
 elif tab_selection == "Talk to your data":
     st.title("💬 Talk to your data")
-    st.info("PostgreSQL connection is active. Natural language query functionality for Phase 2 will be implemented here.")
+    st.markdown("Query your PostgreSQL database using natural language.")
+
+    # Inspect current database schema
+    try:
+        current_schema = get_db_schema_string()
+        with st.expander("🔍 View Active Database Schema Context"):
+            st.text(current_schema)
+    except Exception as e:
+        st.warning(f"Could not connect to database or fetch schema: {e}")
+        current_schema = "Schema unavailable."
+
+    # User Query Input
+    user_query = st.text_input(
+        "Ask a question about your data:",
+        placeholder="E.g., List all books along with their author names, or show members registered after 2020."
+    )
+
+    if st.button("Run Query", type="primary"):
+        if not user_query:
+            st.warning("Please enter a question first.")
+        else:
+            with st.spinner("Converting natural language to SQL..."):
+                try:
+                    client = genai.Client(
+                        vertexai=True,
+                        project='gd-gcp-gridu-genai',
+                        location='us-central1'
+                    )
+
+                    sql_prompt = f"""
+You are an expert PostgreSQL Text-to-SQL translator.
+Given the following database schema:
+
+{current_schema}
+
+Convert this user natural language request into a valid, read-only SQL query:
+"{user_query}"
+
+Rules:
+1. Return ONLY the raw SQL query. Do NOT wrap it in markdown code blocks or add text explanations.
+2. Produce only standard SELECT statements (no INSERT, UPDATE, DELETE, or DROP).
+3. Always match column and table names exactly as defined in the schema (case-sensitive if required).
+"""
+
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=sql_prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.0,
+                        ),
+                    )
+
+                    generated_sql = clean_sql_query(response.text)
+
+                    # Display Generated SQL Query
+                    st.subheader("🤖 Generated SQL Query")
+                    st.code(generated_sql, language="sql")
+
+                    # Execute SQL query against PostgreSQL
+                    with engine.connect() as conn:
+                        result_df = pd.read_sql_query(text(generated_sql), con=conn)
+
+                    # Display Query Result
+                    st.subheader("📊 Query Results")
+                    if result_df.empty:
+                        st.info("The query executed successfully, but returned no rows.")
+                    else:
+                        st.dataframe(result_df, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Error executing query: {e}")
